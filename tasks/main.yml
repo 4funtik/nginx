@@ -1,0 +1,173 @@
+- name: Install Packages
+  apt:
+    update_cache: true
+    pkg:
+    - nginx
+    - certbot
+    - python3-certbot-nginx
+
+- name: Create private key (RSA, 4096 bits)
+  community.crypto.openssl_privatekey:
+    path: "/etc/ssl/private/{{ item }}-selfsigned.key"
+  loop: "{{ nginx_selfsigned_cert }}"
+  notify:
+  - restart nginx
+  when:
+  - nginx_selfsigned_cert is defined
+
+- name: Create simple self-signed certificate
+  community.crypto.x509_certificate:
+    path: "/etc/ssl/certs/{{ item }}-selfsigned.pem"
+    privatekey_path: "/etc/ssl/private/{{ item }}-selfsigned.key"
+    provider: selfsigned
+  loop: "{{ nginx_selfsigned_cert }}"
+  when:
+  - nginx_selfsigned_cert is defined
+
+- name: Check if Nginx configuration for domain exists
+  stat:
+    path: "/etc/nginx/sites-available/{{ item }}.conf"
+  loop: "{{ nginx_letsencrypt_cert }}"
+  register: nginx_conf_check
+
+- name: Create Nginx configuration for domain
+  template:
+    src: "{{ nginx_configs }}/nginx-sites-avaliable.j2"
+    dest: "/etc/nginx/sites-available/{{ item }}.conf"
+  loop: "{{ nginx_letsencrypt_cert }}"
+  notify:
+  - restart nginx
+  when:
+  - nginx_configs is defined
+  - nginx_vhosts is defined
+  - nginx_letsencrypt_cert is defined
+  - not (nginx_conf_check.results | selectattr('item', 'equalto', item) | map(attribute='stat.exists') | first)
+
+- name: Create Nginx configuration for proxied domain
+  template:
+    src: "{{ nginx_configs }}/nginx-sites-avaliable-proxy.j2"
+    dest: "/etc/nginx/sites-available/{{ item }}.conf"
+  loop: "{{ nginx_selfsigned_cert }}"
+  notify:
+  - restart nginx
+  when:
+  - nginx_configs is defined
+  - nginx_vhosts is defined
+  - nginx_selfsigned_cert is defined
+
+- name: Create a symbolic links for domains
+  file:
+    src: "/etc/nginx/sites-available/{{ item }}.conf"
+    dest: "/etc/nginx/sites-enabled/{{ item }}"
+    owner: root
+    group: root
+    state: link
+  loop: "{{ nginx_vhosts }}"
+  notify:
+  - restart nginx
+  when:
+  - nginx_configs is defined
+  - nginx_vhosts is defined
+
+- name: Create directory for each domain
+  file:
+    path: "/var/www/html/{{ item }}"
+    state: directory
+    mode: '0755'
+  loop: "{{ nginx_vhosts }}"
+  notify:
+  - restart nginx
+  when:
+  - nginx_configs is defined
+  - nginx_vhosts is defined
+
+- name: nginx index.html for devops_4
+  template:
+    src: "{{ nginx_configs }}/index.html.j2"
+    dest: "/var/www/html/{{ item }}/index.html"
+  loop: "{{ nginx_vhosts }}"
+  notify:
+  - restart nginx
+  when:
+  - nginx_configs is defined
+  - nginx_vhosts is defined
+
+- name: copy .ini for certbot
+  copy:
+    src: files/cli.ini
+    dest: /etc/letsencrypt/
+  loop: "{{ nginx_letsencrypt_cert }}"
+  when:
+  - nginx_letsencrypt_cert is defined
+
+- name: check letsencrypt certificate
+  stat:
+    path: "/etc/letsencrypt/live/{{ item }}/fullchain.pem"
+  register: letsencrypt_check
+  loop: "{{ nginx_letsencrypt_cert }}"
+  when:
+  - nginx_letsencrypt_cert is defined
+
+- name: Create letsencrypt certificate
+  shell: letsencrypt certonly -n --webroot -w /var/www/html/ -m freeedomall@list.ru --agree-tos -d "{{ item }}"
+  args:
+    creates: "/etc/letsencrypt/live/{{ item }}"
+  loop: "{{ nginx_letsencrypt_cert }}"
+  notify:
+  - restart nginx
+  when:
+  - nginx_letsencrypt_cert is defined
+  - "{{ not (letsencrypt_check.results | selectattr('item', 'equalto', item) | map(attribute='stat.exists') | first) }}"
+
+- name: Remove default file in /etc/nginx/sites-available/
+  file:
+    path: /etc/nginx/sites-available/default
+    state: absent
+  notify:
+  - restart nginx
+  when:
+  - nginx_vhosts is defined
+
+- name: Remove default file symlink in /etc/nginx/sites-enabled/
+  file:
+    path: /etc/nginx/sites-enabled/default
+    state: absent
+  notify:
+  - restart nginx
+  when:
+  - nginx_vhosts is defined
+
+- name: Hide Nginx version
+  lineinfile:
+    path: /etc/nginx/nginx.conf
+    regexp: '.*server_tokens off.*'
+    line: '    server_tokens off;'
+    insertafter: '^http {'
+    state: present
+    validate: nginx -t -c %s
+  notify:
+  - restart nginx
+  when:
+  - nginx_configs is defined
+
+- name: Insert location block for acme-challenge after listen 80
+  template:
+    src: "templates/letsencrypt_auto_renewal/nginx-sites-avaliable_letsencrypt_auto_renewal.j2"
+    dest: "/etc/nginx/sites-available/{{ item }}.conf"
+  loop: "{{ nginx_letsencrypt_cert }}"
+  notify:
+  - restart nginx
+  when:
+    - nginx_letsencrypt_cert_renewal == true
+    - nginx_letsencrypt_cert is defined
+
+- name: Add cron job for certbot renewal
+  ansible.builtin.cron:
+    name: "Certbot Renew and Reload Nginx"
+    minute: "0"
+    hour: "3"
+    user: "root"
+    job: "certbot renew --deploy-hook 'systemctl reload nginx'"
+  when:
+    - nginx_letsencrypt_cert_renewal == true
+    - nginx_letsencrypt_cert is defined
