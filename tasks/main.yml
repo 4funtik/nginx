@@ -167,7 +167,7 @@
     minute: "0"
     hour: "3"
     user: "root"
-    job: "certbot renew --deploy-hook 'systemctl reload nginx'"
+    job: "certbot renew --post-hook 'systemctl reload nginx'"
   when:
     - nginx_letsencrypt_cert_renewal == true
     - nginx_letsencrypt_cert is defined
